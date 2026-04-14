@@ -62,16 +62,24 @@ function computeNormalsFromPositions(positions: Float32Array, indices: Uint32Arr
 // ─── 解析单个 <mesh> 节点 ─────────────────────────────────────────
 function parseMeshNode(mesh: Element): { positions: number[]; indices: number[] } | null {
   // 尝试带命名空间和不带命名空间两种方式获取子元素
-  const getChildren = (parent: Element, tag: string): HTMLCollectionOf<Element> | Element[] => {
-    const ns = parent.getElementsByTagNameNS(NS_3MF, tag);
-    if (ns.length > 0) return ns;
-    return Array.from(parent.getElementsByTagName(tag));
+  const getChildren = (parent: Element, tag: string): Element[] => {
+    // 先尝试带命名空间
+    const nsElements = parent.getElementsByTagNameNS(NS_3MF, tag);
+    if (nsElements.length > 0) {
+      return Array.from(nsElements);
+    }
+    // 再尝试不带命名空间
+    const elements = parent.getElementsByTagName(tag);
+    return elements ? Array.from(elements) : [];
   };
 
-  const verticesEl = getChildren(mesh, 'vertices')[0];
-  const trianglesEl = getChildren(mesh, 'triangles')[0];
+  const verticesEls = getChildren(mesh, 'vertices');
+  const trianglesEls = getChildren(mesh, 'triangles');
 
-  if (!verticesEl || !trianglesEl) return null;
+  if (verticesEls.length === 0 || trianglesEls.length === 0) return null;
+
+  const verticesEl = verticesEls[0];
+  const trianglesEl = trianglesEls[0];
 
   const vertexEls = getChildren(verticesEl, 'vertex');
   const triangleEls = getChildren(trianglesEl, 'triangle');
@@ -79,7 +87,7 @@ function parseMeshNode(mesh: Element): { positions: number[]; indices: number[] 
   if (vertexEls.length === 0 || triangleEls.length === 0) return null;
 
   const positions: number[] = [];
-  for (const v of Array.from(vertexEls)) {
+  for (const v of vertexEls) {
     positions.push(
       pf(v.getAttribute('x')),
       pf(v.getAttribute('y')),
@@ -88,7 +96,7 @@ function parseMeshNode(mesh: Element): { positions: number[]; indices: number[] 
   }
 
   const indices: number[] = [];
-  for (const t of Array.from(triangleEls)) {
+  for (const t of triangleEls) {
     indices.push(
       pi(t.getAttribute('v1')),
       pi(t.getAttribute('v2')),
