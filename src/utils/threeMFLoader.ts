@@ -163,17 +163,46 @@ export async function parse3MFFile(file: File): Promise<FileParserResult> {
     const xmlDoc = new DOMParser().parseFromString(modelContent, 'application/xml');
     const parseError = xmlDoc.querySelector('parsererror');
     if (parseError) {
+      console.error('XML解析错误:', parseError.textContent);
       return { success: false, error: '3MF 模型 XML 解析失败，文件可能已损坏' };
     }
 
-    // Step 4: 提取所有 mesh
-    const meshes = Array.from(xmlDoc.getElementsByTagNameNS(NS_3MF, 'mesh'));
-    if (meshes.length === 0) {
-      // 尝试不带命名空间
-      const meshesNoNS = Array.from(xmlDoc.getElementsByTagName('mesh'));
-      if (meshesNoNS.length > 0) meshes.push(...meshesNoNS);
+    // 调试：显示XML结构的前几行
+    console.log('XML documentElement:', xmlDoc.documentElement?.tagName, 'namespace:', xmlDoc.documentElement?.namespaceURI);
+    
+    // 查找所有可能的元素
+    const allElements: Element[] = [];
+    
+    // Step 4: 提取所有 mesh - 尝试多种方式
+    // 1. 带命名空间的mesh
+    const meshesNS = Array.from(xmlDoc.getElementsByTagNameNS(NS_3MF, 'mesh'));
+    if (meshesNS.length > 0) allElements.push(...meshesNS);
+    
+    // 2. 不带命名空间的mesh
+    const meshesNoNS = Array.from(xmlDoc.getElementsByTagName('mesh'));
+    if (meshesNoNS.length > 0) {
+      const uniqueMeshes = meshesNoNS.filter(el => !allElements.includes(el));
+      allElements.push(...uniqueMeshes);
     }
-    if (meshes.length === 0) {
+    
+    // 3. 尝试查找 resources -> object -> mesh 路径
+    const resources = xmlDoc.getElementsByTagNameNS(NS_3MF, 'resources') || xmlDoc.getElementsByTagName('resources');
+    if (resources.length > 0) {
+      const objects = (resources[0].getElementsByTagNameNS(NS_3MF, 'object') || resources[0].getElementsByTagName('object'));
+      for (const obj of Array.from(objects)) {
+        const meshChildren = obj.getElementsByTagNameNS(NS_3MF, 'mesh') || obj.getElementsByTagName('mesh');
+        if (meshChildren.length > 0) {
+          const unique = Array.from(meshChildren).filter(el => !allElements.includes(el));
+          allElements.push(...unique);
+        }
+      }
+    }
+    
+    console.log(`找到 ${allElements.length} 个mesh元素`);
+    if (allElements.length === 0) {
+      // 输出一些调试信息
+      const firstChild = xmlDoc.documentElement?.firstElementChild;
+      console.log('第一个子元素:', firstChild?.tagName);
       return { success: false, error: '3MF 文件中未找到网格数据' };
     }
 
@@ -182,7 +211,7 @@ export async function parse3MFFile(file: File): Promise<FileParserResult> {
     const allIndices: number[] = [];
     let vertexOffset = 0;
 
-    for (const mesh of meshes) {
+    for (const mesh of allElements) {
       const result = parseMeshNode(mesh);
       if (!result) continue;
 
