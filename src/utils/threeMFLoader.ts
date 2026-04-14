@@ -171,70 +171,82 @@ export async function parse3MFFile(file: File): Promise<FileParserResult> {
     // 调试：显示XML结构的前几行
     console.log('XML documentElement:', xmlDoc.documentElement?.tagName, 'namespace:', xmlDoc.documentElement?.namespaceURI);
     
-    // Step 4: 采用更智能的查找策略
+    // Step 4: 采用更智能的查找策略 - 特别针对Bambu Studio格式
     console.log('XML文档结构:', xmlDoc.documentElement?.outerHTML?.substring(0, 1000));
     
     const allElements: Element[] = [];
     
-    // 方法1: 递归遍历所有元素，查找任何包含"mesh"的元素
-    const traverseElements = (node: Element) => {
-      // 检查当前节点的tagName是否包含"mesh"
-      const tagName = node.tagName.toLowerCase();
-      
-      if (tagName.includes('mesh')) {
-        console.log('找到mesh元素:', node.tagName, 'namespace:', node.namespaceURI);
-        allElements.push(node);
-      }
-      
-      // 遍历子元素
-      for (const child of Array.from(node.children)) {
-        if (child.nodeType === Node.ELEMENT_NODE) {
-          traverseElements(child as Element);
+    // 方法1: 直接查找所有带命名空间的mesh元素
+    const meshes = xmlDoc.getElementsByTagNameNS(NS_3MF, 'mesh');
+    if (meshes.length > 0) {
+      console.log(`通过getElementsByTagNameNS找到 ${meshes.length} 个mesh元素`);
+      allElements.push(...Array.from(meshes));
+    }
+    
+    // 方法2: 如果没找到，检查resources元素内部
+    if (allElements.length === 0) {
+      console.log('检查resources元素...');
+      const resourcesList = xmlDoc.getElementsByTagNameNS(NS_3MF, 'resources');
+      if (resourcesList.length > 0) {
+        const resources = resourcesList[0];
+        console.log('找到resources元素，子元素数量:', resources.children.length);
+        
+        // 遍历resources的所有子元素
+        for (const child of Array.from(resources.children)) {
+          if (child.nodeType === Node.ELEMENT_NODE) {
+            const element = child as Element;
+            const tagName = element.tagName.toLowerCase();
+            const localName = element.localName.toLowerCase();
+            console.log(`resources子元素: tagName=${tagName}, localName=${localName}, namespace=${element.namespaceURI}`);
+            
+            // 检查这个元素是否有mesh子元素
+            const meshChildren = element.getElementsByTagNameNS(NS_3MF, 'mesh');
+            if (meshChildren.length > 0) {
+              console.log(`在 ${element.tagName} 中找到 ${meshChildren.length} 个mesh子元素`);
+              allElements.push(...Array.from(meshChildren));
+            }
+          }
         }
       }
-    };
+    }
     
-    traverseElements(xmlDoc.documentElement);
-    
-    // 方法2: 如果还没找到，尝试更直接的XPath查询
+    // 方法3: 如果还没找到，尝试XPath查询
     if (allElements.length === 0) {
       console.log('尝试XPath查找...');
-      
-      // 尝试不同的命名空间组合
-      const namespaces = [
-        'http://schemas.microsoft.com/3dmanufacturing/core/2015/02',  // 官方
-        'http://schemas.microsoft.com/3dmanufacturing/core/2015/02',  // 常用
-        'http://schemas.microsoft.com/3dmanufacturing/core/2017/02',  // 新版本
-        null  // 无命名空间
-      ];
-      
-      for (const ns of namespaces) {
-        const query = ns ? `//*[local-name()='mesh' and namespace-uri()='${ns}']` : '//mesh';
-        const result = xmlDoc.evaluate(
-          query, 
-          xmlDoc, 
-          null, 
-          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, 
+      try {
+        const xpathResult = xmlDoc.evaluate(
+          '//*[local-name()="mesh"]',
+          xmlDoc,
+          null,
+          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
           null
         );
         
-        for (let i = 0; i < result.snapshotLength; i++) {
-          const el = result.snapshotItem(i) as Element;
-          if (!allElements.includes(el)) {
-            console.log('XPath找到mesh:', el.tagName, 'namespace:', el.namespaceURI);
-            allElements.push(el);
+        for (let i = 0; i < xpathResult.snapshotLength; i++) {
+          const node = xpathResult.snapshotItem(i);
+          if (node && node.nodeType === Node.ELEMENT_NODE) {
+            const element = node as Element;
+            if (!allElements.includes(element)) {
+              console.log('XPath找到mesh元素:', element.localName, 'namespace:', element.namespaceURI);
+              allElements.push(element);
+            }
           }
         }
+      } catch (xpathError) {
+        console.error('XPath查询失败:', xpathError);
       }
     }
     
     console.log(`总共找到 ${allElements.length} 个mesh元素`);
     if (allElements.length === 0) {
       // 输出更详细的调试信息
-      const root = xmlDoc.documentElement;
-      console.log('根元素完整tag:', root?.outerHTML?.substring(0, 500));
-      const children = Array.from(root?.children || []);
-      console.log('根元素子节点:', children.map(c => c.tagName).join(', '));
+      console.log('根元素子节点:', Array.from(xmlDoc.documentElement?.children || []).map(c => c.tagName).join(', '));
+      
+      // 特别检查resources元素
+      const resourcesList = xmlDoc.getElementsByTagNameNS(NS_3MF, 'resources');
+      if (resourcesList.length > 0) {
+        console.log('resources元素详细内容:', resourcesList[0].outerHTML.substring(0, 500));
+      }
       
       return { success: false, error: '3MF 文件中未找到网格数据' };
     }
