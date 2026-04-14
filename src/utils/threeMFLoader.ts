@@ -5,7 +5,7 @@ import { FileParserResult, ModelGeometry } from '../types';
 // 官方标准命名空间
 const NS_3MF = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02';
 
-// ─── 辅助：安全解析 float ────────────────────────────────────────
+// ─── 辅助函数 ──────────────────────────────────────────────────
 function pf(s: string | null, fallback = 0): number {
   if (!s) return fallback;
   const v = parseFloat(s);
@@ -16,6 +16,39 @@ function pi(s: string | null, fallback = 0): number {
   if (!s) return fallback;
   const v = parseInt(s, 10);
   return isNaN(v) ? fallback : v;
+}
+
+// 在特定命名空间下查找元素
+function findElementsByTagName(parent: Element, tagName: string, namespace: string = NS_3MF): Element[] {
+  const result: Element[] = [];
+  
+  // 尝试带命名空间
+  const nsElements = parent.getElementsByTagNameNS(namespace, tagName);
+  if (nsElements.length > 0) {
+    result.push(...Array.from(nsElements));
+  }
+  
+  // 尝试不带命名空间
+  const elements = parent.getElementsByTagName(tagName);
+  if (elements.length > 0) {
+    for (const el of Array.from(elements)) {
+      if (!result.includes(el)) {
+        result.push(el);
+      }
+    }
+  }
+  
+  return result;
+}
+
+// 获取元素的属性值（支持带前缀的属性）
+function getAttr(element: Element, name: string): string | null {
+  // 先尝试带命名空间前缀
+  const namespaced = element.getAttribute(`${name}`);
+  if (namespaced !== null) return namespaced;
+  
+  // 尝试不带前缀
+  return element.getAttribute(name);
 }
 
 // ─── 计算三角形法线 ──────────────────────────────────────────────
@@ -171,84 +204,114 @@ export async function parse3MFFile(file: File): Promise<FileParserResult> {
     // 调试：显示XML结构的前几行
     console.log('XML documentElement:', xmlDoc.documentElement?.tagName, 'namespace:', xmlDoc.documentElement?.namespaceURI);
     
-    // Step 4: 采用更智能的查找策略 - 特别针对Bambu Studio格式
-    console.log('XML文档结构:', xmlDoc.documentElement?.outerHTML?.substring(0, 1000));
+    // Step 4: 重新设计解析流程，支持组件引用模式
+    console.log('开始解析3MF文件结构...');
     
-    const allElements: Element[] = [];
+    // 收集所有找到的mesh元素
+    const allMeshes: Element[] = [];
+    let objectIdToMesh: Map<string, Element> = new Map();
     
-    // 方法1: 直接查找所有带命名空间的mesh元素
-    const meshes = xmlDoc.getElementsByTagNameNS(NS_3MF, 'mesh');
-    if (meshes.length > 0) {
-      console.log(`通过getElementsByTagNameNS找到 ${meshes.length} 个mesh元素`);
-      allElements.push(...Array.from(meshes));
-    }
+    // 1. 首先解析resources部分，建立对象ID到mesh的映射
+    console.log('解析resources部分...');
+    const resourcesElements = findElementsByTagName(xmlDoc.documentElement, 'resources');
     
-    // 方法2: 如果没找到，检查resources元素内部
-    if (allElements.length === 0) {
-      console.log('检查resources元素...');
-      const resourcesList = xmlDoc.getElementsByTagNameNS(NS_3MF, 'resources');
-      if (resourcesList.length > 0) {
-        const resources = resourcesList[0];
-        console.log('找到resources元素，子元素数量:', resources.children.length);
+    for (const resources of resourcesElements) {
+      console.log(`解析resources，子元素数量: ${resources.children.length}`);
+      
+      // 查找所有object元素
+      const objects = findElementsByTagName(resources, 'object');
+      console.log(`找到 ${objects.length} 个object元素`);
+      
+      for (const object of objects) {
+        const objectId = getAttr(object, 'id') || 'unknown';
+        console.log(`解析object id=${objectId}`);
         
-        // 遍历resources的所有子元素
-        for (const child of Array.from(resources.children)) {
-          if (child.nodeType === Node.ELEMENT_NODE) {
-            const element = child as Element;
-            const tagName = element.tagName.toLowerCase();
-            const localName = element.localName.toLowerCase();
-            console.log(`resources子元素: tagName=${tagName}, localName=${localName}, namespace=${element.namespaceURI}`);
+        // 查找object内部的mesh
+        const meshesInObject = findElementsByTagName(object, 'mesh');
+        if (meshesInObject.length > 0) {
+          console.log(`object id=${objectId} 包含 ${meshesInObject.length} 个mesh`);
+          allMeshes.push(...meshesInObject);
+          objectIdToMesh.set(objectId, meshesInObject[0]); // 假设每个object只有一个mesh
+        } else {
+          console.log(`object id=${objectId} 不包含mesh，检查components引用`);
+          
+          // 检查是否有components引用
+          const componentsList = findElementsByTagName(object, 'components');
+          for (const components of componentsList) {
+            const componentElements = findElementsByTagName(components, 'component');
+            console.log(`object id=${objectId} 有 ${componentElements.length} 个component引用`);
             
-            // 检查这个元素是否有mesh子元素
-            const meshChildren = element.getElementsByTagNameNS(NS_3MF, 'mesh');
-            if (meshChildren.length > 0) {
-              console.log(`在 ${element.tagName} 中找到 ${meshChildren.length} 个mesh子元素`);
-              allElements.push(...Array.from(meshChildren));
-            }
+            // 这里需要处理component引用，但现在先跳过
           }
         }
       }
     }
     
-    // 方法3: 如果还没找到，尝试XPath查询
-    if (allElements.length === 0) {
-      console.log('尝试XPath查找...');
-      try {
-        const xpathResult = xmlDoc.evaluate(
-          '//*[local-name()="mesh"]',
-          xmlDoc,
-          null,
-          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-          null
-        );
+    // 2. 如果直接找到了mesh，使用它们
+    if (allMeshes.length > 0) {
+      console.log(`直接找到 ${allMeshes.length} 个mesh元素`);
+    } else {
+      // 3. 如果没有直接mesh，尝试从组件引用中提取
+      console.log('未找到直接mesh，尝试解析build部分...');
+      
+      // 查找build部分
+      const buildElements = findElementsByTagName(xmlDoc.documentElement, 'build');
+      for (const build of buildElements) {
+        const items = findElementsByTagName(build, 'item');
+        console.log(`build部分有 ${items.length} 个item`);
         
-        for (let i = 0; i < xpathResult.snapshotLength; i++) {
-          const node = xpathResult.snapshotItem(i);
-          if (node && node.nodeType === Node.ELEMENT_NODE) {
-            const element = node as Element;
-            if (!allElements.includes(element)) {
-              console.log('XPath找到mesh元素:', element.localName, 'namespace:', element.namespaceURI);
-              allElements.push(element);
-            }
+        for (const item of items) {
+          const objectId = getAttr(item, 'objectid');
+          if (objectId) {
+            console.log(`item引用了objectid=${objectId}`);
+            // 这里需要根据objectId找到对应的mesh
           }
         }
-      } catch (xpathError) {
-        console.error('XPath查询失败:', xpathError);
       }
     }
     
-    console.log(`总共找到 ${allElements.length} 个mesh元素`);
-    if (allElements.length === 0) {
-      // 输出更详细的调试信息
-      console.log('根元素子节点:', Array.from(xmlDoc.documentElement?.children || []).map(c => c.tagName).join(', '));
+    // 4. 如果还是没找到，尝试解析可能的.model文件引用
+    if (allMeshes.length === 0) {
+      console.log('尝试从ZIP包中查找其他.model文件...');
       
-      // 特别检查resources元素
-      const resourcesList = xmlDoc.getElementsByTagNameNS(NS_3MF, 'resources');
-      if (resourcesList.length > 0) {
-        console.log('resources元素详细内容:', resourcesList[0].outerHTML.substring(0, 500));
+      // 查找ZIP包中所有.model文件
+      const modelFiles = zip.file(/\.model$/i);
+      console.log(`ZIP包中包含 ${modelFiles.length} 个.model文件`);
+      
+      // 排除已经加载的主.model文件
+      const otherModelFiles = modelFiles.filter(f => f.name !== '_rels/.rels' && f.name !== '3D/3dmodel.model');
+      
+      for (const modelFile of otherModelFiles) {
+        try {
+          console.log(`尝试解析.model文件: ${modelFile.name}`);
+          const modelContent = await modelFile.async('text');
+          const modelDoc = new DOMParser().parseFromString(modelContent, 'application/xml');
+          
+          // 在这个.model文件中查找mesh
+          const meshesInModel = findElementsByTagName(modelDoc.documentElement, 'mesh');
+          if (meshesInModel.length > 0) {
+            console.log(`在 ${modelFile.name} 中找到 ${meshesInModel.length} 个mesh`);
+            allMeshes.push(...meshesInModel);
+          }
+        } catch (error) {
+          console.error(`解析.model文件 ${modelFile.name} 失败:`, error);
+        }
       }
+    }
+    
+    console.log(`总共找到 ${allMeshes.length} 个mesh元素`);
+    
+    if (allMeshes.length === 0) {
+      // 提供更详细的错误信息
+      console.error('无法找到任何mesh数据。可能的3MF文件结构:');
+      console.error('1. 标准模式: object -> mesh');
+      console.error('2. 组件模式: object -> components -> component -> 引用其他.model文件');
+      console.error('3. Bambu Studio模式: 多个.model文件，build部分引用');
       
-      return { success: false, error: '3MF 文件中未找到网格数据' };
+      return { 
+        success: false, 
+        error: '3MF 文件中未找到网格数据。这是一个复杂的3MF文件结构，可能需要完整的3MF解析器实现。' 
+      };
     }
 
     // Step 5: 合并所有 mesh 的几何数据
@@ -256,7 +319,7 @@ export async function parse3MFFile(file: File): Promise<FileParserResult> {
     const allIndices: number[] = [];
     let vertexOffset = 0;
 
-    for (const mesh of allElements) {
+    for (const mesh of allMeshes) {
       const result = parseMeshNode(mesh);
       if (!result) continue;
 
