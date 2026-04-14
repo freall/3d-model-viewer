@@ -1,172 +1,228 @@
-import { FileParserResult } from '../types';
+import JSZip from 'jszip';
+import { FileParserResult, ModelGeometry } from '../types';
 
-/**
- * 解析3MF文件
- * 注意：3MF解析比较复杂，这是一个简化的实现
- */
+// ─── 3MF 命名空间 ────────────────────────────────────────────────
+const NS_3MF = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02';
+
+// ─── 辅助：安全解析 float ────────────────────────────────────────
+function pf(s: string | null, fallback = 0): number {
+  if (!s) return fallback;
+  const v = parseFloat(s);
+  return isNaN(v) ? fallback : v;
+}
+
+function pi(s: string | null, fallback = 0): number {
+  if (!s) return fallback;
+  const v = parseInt(s, 10);
+  return isNaN(v) ? fallback : v;
+}
+
+// ─── 计算三角形法线 ──────────────────────────────────────────────
+function computeNormalsFromPositions(positions: Float32Array, indices: Uint32Array): Float32Array {
+  const normals = new Float32Array(positions.length);
+  const count = indices.length / 3;
+
+  for (let i = 0; i < count; i++) {
+    const i0 = indices[i * 3] * 3;
+    const i1 = indices[i * 3 + 1] * 3;
+    const i2 = indices[i * 3 + 2] * 3;
+
+    const ax = positions[i1] - positions[i0];
+    const ay = positions[i1 + 1] - positions[i0 + 1];
+    const az = positions[i1 + 2] - positions[i0 + 2];
+
+    const bx = positions[i2] - positions[i0];
+    const by = positions[i2 + 1] - positions[i0 + 1];
+    const bz = positions[i2 + 2] - positions[i0 + 2];
+
+    const nx = ay * bz - az * by;
+    const ny = az * bx - ax * bz;
+    const nz = ax * by - ay * bx;
+
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+
+    for (const idx of [i0, i1, i2]) {
+      normals[idx]     += nx / len;
+      normals[idx + 1] += ny / len;
+      normals[idx + 2] += nz / len;
+    }
+  }
+
+  // 归一化每个顶点法线
+  for (let i = 0; i < normals.length; i += 3) {
+    const len = Math.sqrt(normals[i] ** 2 + normals[i + 1] ** 2 + normals[i + 2] ** 2) || 1;
+    normals[i]     /= len;
+    normals[i + 1] /= len;
+    normals[i + 2] /= len;
+  }
+
+  return normals;
+}
+
+// ─── 解析单个 <mesh> 节点 ─────────────────────────────────────────
+function parseMeshNode(mesh: Element): { positions: number[]; indices: number[] } | null {
+  // 尝试带命名空间和不带命名空间两种方式获取子元素
+  const getChildren = (parent: Element, tag: string): HTMLCollectionOf<Element> | Element[] => {
+    const ns = parent.getElementsByTagNameNS(NS_3MF, tag);
+    if (ns.length > 0) return ns;
+    return Array.from(parent.getElementsByTagName(tag));
+  };
+
+  const verticesEl = getChildren(mesh, 'vertices')[0];
+  const trianglesEl = getChildren(mesh, 'triangles')[0];
+
+  if (!verticesEl || !trianglesEl) return null;
+
+  const vertexEls = getChildren(verticesEl, 'vertex');
+  const triangleEls = getChildren(trianglesEl, 'triangle');
+
+  if (vertexEls.length === 0 || triangleEls.length === 0) return null;
+
+  const positions: number[] = [];
+  for (const v of Array.from(vertexEls)) {
+    positions.push(
+      pf(v.getAttribute('x')),
+      pf(v.getAttribute('y')),
+      pf(v.getAttribute('z')),
+    );
+  }
+
+  const indices: number[] = [];
+  for (const t of Array.from(triangleEls)) {
+    indices.push(
+      pi(t.getAttribute('v1')),
+      pi(t.getAttribute('v2')),
+      pi(t.getAttribute('v3')),
+    );
+  }
+
+  return { positions, indices };
+}
+
+// ─── 主解析函数 ──────────────────────────────────────────────────
 export async function parse3MFFile(file: File): Promise<FileParserResult> {
   try {
-    // 检查文件扩展名
     if (!file.name.toLowerCase().endsWith('.3mf')) {
-      return {
-        success: false,
-        error: '文件必须是.3mf扩展名'
-      };
+      return { success: false, error: '文件必须是 .3mf 格式' };
     }
-
-    // 检查文件大小
-    if (file.size === 0) {
-      return {
-        success: false,
-        error: '文件为空'
-      };
-    }
-
+    if (file.size === 0) return { success: false, error: '文件为空' };
     if (file.size > 100 * 1024 * 1024) {
-      return {
-        success: false,
-        error: '文件过大，请上传小于100MB的文件'
-      };
+      return { success: false, error: '文件过大，请上传小于 100MB 的文件' };
     }
 
-    // 实际项目中，应该使用three.js的3MFLoader或专门的解析库
-    // 这里我们提供一个占位实现，稍后可以替换为完整实现
-    
-    return {
-      success: false,
-      error: '3MF格式支持正在开发中，请暂时使用STL格式'
-    };
-    
-    /*
-    // 这是完整实现的示例结构：
+    // Step 1: 解压 ZIP
+    const arrayBuffer = await file.arrayBuffer();
+    let zip: JSZip;
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      
-      // 解压ZIP文件（3MF本质上是ZIP压缩包）
-      const zip = await JSZip.loadAsync(arrayBuffer);
-      
-      // 读取3D模型文件
-      const modelFile = zip.file(/\.model$/)[0];
-      if (!modelFile) {
-        return {
-          success: false,
-          error: '3MF文件中未找到模型数据'
-        };
-      }
-      
-      const modelContent = await modelFile.async('text');
-      
-      // 解析XML内容
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(modelContent, 'application/xml');
-      
-      // 提取网格数据
-      const meshes = xmlDoc.getElementsByTagName('mesh');
-      if (meshes.length === 0) {
-        return {
-          success: false,
-          error: '3MF文件中未找到网格数据'
-        };
-      }
-      
-      // 解析顶点和三角形数据
-      const positions: number[] = [];
-      const indices: number[] = [];
-      
-      for (const mesh of Array.from(meshes)) {
-        // 解析顶点
-        const vertices = mesh.getElementsByTagName('vertex');
-        for (const vertex of Array.from(vertices)) {
-          const x = parseFloat(vertex.getAttribute('x') || '0');
-          const y = parseFloat(vertex.getAttribute('y') || '0');
-          const z = parseFloat(vertex.getAttribute('z') || '0');
-          positions.push(x, y, z);
-        }
-        
-        // 解析三角形
-        const triangles = mesh.getElementsByTagName('triangle');
-        for (const triangle of Array.from(triangles)) {
-          const v1 = parseInt(triangle.getAttribute('v1') || '0');
-          const v2 = parseInt(triangle.getAttribute('v2') || '0');
-          const v3 = parseInt(triangle.getAttribute('v3') || '0');
-          indices.push(v1, v2, v3);
-        }
-      }
-      
-      if (positions.length === 0) {
-        return {
-          success: false,
-          error: '未找到有效的几何数据'
-        };
-      }
-      
-      // 计算法线
-      const normals = computeNormals(positions, indices);
-      
-      const geometry: ModelGeometry = {
-        position: new Float32Array(positions),
-        normal: new Float32Array(normals),
-        index: new Uint32Array(indices)
-      };
-      
-      return {
-        success: true,
-        geometry
-      };
-      
-    } catch (error) {
-      return {
-        success: false,
-        error: `3MF解析错误: ${error instanceof Error ? error.message : '未知错误'}`
-      };
+      zip = await JSZip.loadAsync(arrayBuffer);
+    } catch {
+      return { success: false, error: '无法解压文件，请确认是有效的 3MF 文件' };
     }
-    */
+
+    // Step 2: 找到 .model 文件（先查 _rels/.rels，再 fallback 搜索）
+    let modelContent: string | null = null;
+
+    const relsFile = zip.file('_rels/.rels');
+    if (relsFile) {
+      try {
+        const relsText = await relsFile.async('text');
+        const relsDoc = new DOMParser().parseFromString(relsText, 'application/xml');
+        const relationships = relsDoc.getElementsByTagName('Relationship');
+        for (const rel of Array.from(relationships)) {
+          const type = rel.getAttribute('Type') || '';
+          if (type.includes('3dmodel')) {
+            const target = (rel.getAttribute('Target') || '').replace(/^\//, '');
+            const modelFile = zip.file(target);
+            if (modelFile) {
+              modelContent = await modelFile.async('text');
+              break;
+            }
+          }
+        }
+      } catch { /* 继续 fallback */ }
+    }
+
+    if (!modelContent) {
+      // Fallback：直接找 .model 文件
+      const modelFiles = zip.file(/\.model$/i);
+      if (modelFiles.length === 0) {
+        return { success: false, error: '3MF 文件中未找到模型数据（缺少 .model 文件）' };
+      }
+      modelContent = await modelFiles[0].async('text');
+    }
+
+    // Step 3: 解析 XML
+    const xmlDoc = new DOMParser().parseFromString(modelContent, 'application/xml');
+    const parseError = xmlDoc.querySelector('parsererror');
+    if (parseError) {
+      return { success: false, error: '3MF 模型 XML 解析失败，文件可能已损坏' };
+    }
+
+    // Step 4: 提取所有 mesh
+    const meshes = Array.from(xmlDoc.getElementsByTagNameNS(NS_3MF, 'mesh'));
+    if (meshes.length === 0) {
+      // 尝试不带命名空间
+      const meshesNoNS = Array.from(xmlDoc.getElementsByTagName('mesh'));
+      if (meshesNoNS.length > 0) meshes.push(...meshesNoNS);
+    }
+    if (meshes.length === 0) {
+      return { success: false, error: '3MF 文件中未找到网格数据' };
+    }
+
+    // Step 5: 合并所有 mesh 的几何数据
+    const allPositions: number[] = [];
+    const allIndices: number[] = [];
+    let vertexOffset = 0;
+
+    for (const mesh of meshes) {
+      const result = parseMeshNode(mesh);
+      if (!result) continue;
+
+      allPositions.push(...result.positions);
+      for (const idx of result.indices) {
+        allIndices.push(idx + vertexOffset);
+      }
+      vertexOffset += result.positions.length / 3;
+    }
+
+    if (allPositions.length === 0) {
+      return { success: false, error: '未找到有效的几何数据' };
+    }
+
+    const posFloat = new Float32Array(allPositions);
+    const idxUint = new Uint32Array(allIndices);
+    const normals = computeNormalsFromPositions(posFloat, idxUint);
+
+    const geometry: ModelGeometry = {
+      position: posFloat,
+      normal: normals,
+      index: idxUint,
+    };
+
+    return { success: true, geometry };
+
   } catch (error) {
     return {
       success: false,
-      error: `3MF文件处理失败: ${error instanceof Error ? error.message : '未知错误'}`
+      error: `3MF 解析失败: ${error instanceof Error ? error.message : '未知错误'}`,
     };
   }
 }
 
-
-
-/**
- * 验证3MF文件
- */
+// ─── 验证 ────────────────────────────────────────────────────────
 export function validate3MFFile(file: File): string | null {
-  const fileName = file.name.toLowerCase();
-  
-  if (!fileName.endsWith('.3mf')) {
-    return '文件必须是.3mf扩展名';
-  }
-  
-  if (file.size === 0) {
-    return '文件为空';
-  }
-  
-  if (file.size > 100 * 1024 * 1024) {
-    return '文件过大，请上传小于100MB的文件';
-  }
-  
+  if (!file.name.toLowerCase().endsWith('.3mf')) return '文件必须是 .3mf 格式';
+  if (file.size === 0) return '文件为空';
+  if (file.size > 100 * 1024 * 1024) return '文件过大，请上传小于 100MB 的文件';
   return null;
 }
 
-/**
- * 检查文件是否为有效的3MF文件
- */
 export async function is3MFFile(file: File): Promise<boolean> {
   try {
-    if (!file.name.toLowerCase().endsWith('.3mf')) {
-      return false;
-    }
-    
-    // 检查文件魔术字节（ZIP格式）
+    if (!file.name.toLowerCase().endsWith('.3mf')) return false;
     const arrayBuffer = await file.slice(0, 4).arrayBuffer();
-    const dataView = new DataView(arrayBuffer);
-    
-    // ZIP文件魔术字节：PK\x03\x04 或 PK\x05\x06（空存档）或 PK\x07\x08（分卷）
-    const magic = dataView.getUint32(0, false);
+    const dv = new DataView(arrayBuffer);
+    const magic = dv.getUint32(0, false);
     return magic === 0x504B0304 || magic === 0x504B0506 || magic === 0x504B0708;
   } catch {
     return false;

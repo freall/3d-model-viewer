@@ -5,6 +5,7 @@ import { ModelFile } from '../../types';
 
 interface FileUploaderProps {
   onFileUpload: (file: ModelFile) => void;
+  onRawFile?: (file: File) => void;  // 新增：传递原始 File 对象供解析
   onError: (error: string) => void;
   isLoading: boolean;
   currentFile: ModelFile | null;
@@ -12,6 +13,7 @@ interface FileUploaderProps {
 
 const FileUploader: React.FC<FileUploaderProps> = ({
   onFileUpload,
+  onRawFile,
   onError,
   isLoading,
   currentFile,
@@ -63,7 +65,13 @@ const FileUploader: React.FC<FileUploaderProps> = ({
       return;
     }
 
-    // 模拟上传进度
+    // 如果有 onRawFile，直接交给 App.tsx 的真实解析器处理
+    if (onRawFile) {
+      onRawFile(file);
+      return;
+    }
+
+    // fallback：老逻辑（模拟上传）
     setUploadProgress(0);
     const progressInterval = setInterval(() => {
       setUploadProgress(prev => {
@@ -79,7 +87,6 @@ const FileUploader: React.FC<FileUploaderProps> = ({
     const fileType = fileName.endsWith('.3mf') ? '3mf' : 
                      fileName.endsWith('.stl') ? 'stl' : 'unknown';
 
-    // 创建对象URL用于预览
     const objectUrl = URL.createObjectURL(file);
 
     const modelFile: ModelFile = {
@@ -91,7 +98,6 @@ const FileUploader: React.FC<FileUploaderProps> = ({
       uploadedAt: new Date(),
     };
 
-    // 模拟文件处理完成
     setTimeout(() => {
       clearInterval(progressInterval);
       setUploadProgress(100);
@@ -100,7 +106,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({
         setUploadProgress(0);
       }, 300);
     }, 500);
-  }, [onFileUpload, onError]);
+  }, [onFileUpload, onRawFile, onError]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();

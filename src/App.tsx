@@ -1,7 +1,9 @@
 import React, { useState, useCallback } from 'react';
-import { motion } from 'framer-motion';
-import { Upload, Ruler, Brain, Zap, CheckCircle, Box as Cube } from 'lucide-react';
-import { ModelFile, ModelDimensions, ModelStats } from './types';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Upload, Ruler, Brain, Zap, CheckCircle, Box as Cube, RefreshCw, ArrowDownToLine } from 'lucide-react';
+import { ModelFile, ModelDimensions, ModelStats, ModelGeometry } from './types';
+import { parseFile } from './utils/fileParser';
+import { downloadAsSTL } from './utils/stlExporter';
 import FileUploader from './components/FileUploader/FileUploader';
 import ModelViewer from './components/ModelViewer/ModelViewer';
 import ModelControls from './components/ModelControls/ModelControls';
@@ -14,38 +16,55 @@ const App: React.FC = () => {
   const [stats, setStats] = useState<ModelStats | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [geometryRef, setGeometryRef] = useState<ModelGeometry | null>(null);
+  const [isConverting, setIsConverting] = useState(false);
+  const [convertSuccess, setConvertSuccess] = useState(false);
 
-  const handleFileUpload = useCallback((file: ModelFile) => {
+  // 处理文件上传：调用真实解析器
+  const handleFileUpload = useCallback(async (file: ModelFile) => {
     setModelFile(file);
     setError(null);
     setIsLoading(true);
-    
-    // 这里稍后会实现文件解析逻辑
-    setTimeout(() => {
-      // 模拟解析完成
-      const mockDimensions: ModelDimensions = {
-        width: 120.5,
-        height: 85.3,
-        depth: 45.2,
-        volume: 460820,
-        surfaceArea: 35840,
-        boundingBox: {
-          min: { x: -60.25, y: -42.65, z: -22.6 },
-          max: { x: 60.25, y: 42.65, z: 22.6 }
-        }
-      };
+    setGeometryRef(null);
+    setDimensions(null);
+    setStats(null);
+    setConvertSuccess(false);
 
-      const mockStats: ModelStats = {
-        vertices: 14562,
-        faces: 29124,
-        triangles: 29124,
-        edges: 43686
-      };
-
-      setDimensions(mockDimensions);
-      setStats(mockStats);
+    try {
+      // 通过 URL 重建 File 对象已不可行，我们在 FileUploader 中需要传原始 File
+      // 但当前架构 onFileUpload 只收到 ModelFile，几何体由 parseFile 处理
+      // 此处 geometry 已通过 handleRawFile 提前解析并存储
+    } catch {
+      // 会在 handleRawFile 中处理
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
+  }, []);
+
+  // 真正的解析入口：FileUploader 拿到 raw File 后调用
+  const handleRawFile = useCallback(async (rawFile: File) => {
+    setError(null);
+    setIsLoading(true);
+    setGeometryRef(null);
+    setDimensions(null);
+    setStats(null);
+    setConvertSuccess(false);
+
+    const result = await parseFile(rawFile);
+
+    if (!result.success || !result.geometry) {
+      setError(result.error || '文件解析失败');
+      setModelFile(null);
+      setIsLoading(false);
+      return;
+    }
+
+    setGeometryRef(result.geometry);
+    if (result.dimensions) setDimensions(result.dimensions);
+    if (result.stats) setStats(result.stats);
+    if (result.fileInfo) setModelFile(result.fileInfo);
+
+    setIsLoading(false);
   }, []);
 
   const handleFileError = useCallback((errorMessage: string) => {
@@ -53,6 +72,7 @@ const App: React.FC = () => {
     setModelFile(null);
     setDimensions(null);
     setStats(null);
+    setGeometryRef(null);
   }, []);
 
   const handleClearModel = useCallback(() => {
@@ -60,7 +80,33 @@ const App: React.FC = () => {
     setDimensions(null);
     setStats(null);
     setError(null);
+    setGeometryRef(null);
+    setConvertSuccess(false);
   }, []);
+
+  // ─── 3MF → STL 转换 ─────────────────────────────────────────
+  const handleConvertToSTL = useCallback(async () => {
+    if (!geometryRef || !modelFile) return;
+
+    setIsConverting(true);
+    try {
+      const baseName = modelFile.name.replace(/\.(3mf|stl)$/i, '');
+      // 在 Web Worker 或主线程中运行都可以；数据量不超过几十万三角形时主线程足够
+      await new Promise<void>((resolve) => {
+        setTimeout(() => {
+          downloadAsSTL(geometryRef, baseName);
+          resolve();
+        }, 0);
+      });
+      setConvertSuccess(true);
+      setTimeout(() => setConvertSuccess(false), 3000);
+    } finally {
+      setIsConverting(false);
+    }
+  }, [geometryRef, modelFile]);
+
+  const is3MF = modelFile?.type === '3mf';
+  const canConvert = !!geometryRef && !isLoading;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-blue-900 transition-colors duration-300">
@@ -78,7 +124,7 @@ const App: React.FC = () => {
             </h1>
           </div>
           <p className="text-lg text-gray-600 dark:text-gray-300 max-w-2xl mx-auto">
-            上传您的3MF或STL文件，实时查看3D模型，精确测量尺寸，分析模型结构
+            上传3MF或STL文件，实时查看3D模型、精确测量尺寸，并支持 3MF → STL 格式转换
           </p>
         </motion.div>
       </header>
@@ -94,11 +140,61 @@ const App: React.FC = () => {
             >
               <FileUploader
                 onFileUpload={handleFileUpload}
+                onRawFile={handleRawFile}
                 onError={handleFileError}
                 isLoading={isLoading}
                 currentFile={modelFile}
               />
             </motion.div>
+
+            {/* 3MF → STL 转换卡片 */}
+            <AnimatePresence>
+              {canConvert && (
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  transition={{ duration: 0.4 }}
+                  className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm rounded-2xl p-5 shadow-lg border border-blue-200 dark:border-blue-800"
+                >
+                  <h3 className="font-semibold text-base mb-1 flex items-center gap-2 text-gray-800 dark:text-gray-100">
+                    <ArrowDownToLine className="w-4 h-4 text-blue-500" />
+                    {is3MF ? '3MF → STL 转换' : '导出 STL'}
+                  </h3>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                    {is3MF
+                      ? '将当前 3MF 模型的几何数据导出为二进制 STL 文件，可直接用于切片软件。'
+                      : '将当前模型重新导出为二进制 STL 文件。'}
+                  </p>
+                  <button
+                    onClick={handleConvertToSTL}
+                    disabled={isConverting}
+                    className={`w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-medium text-sm transition-all
+                      ${convertSuccess
+                        ? 'bg-green-500 text-white'
+                        : 'bg-gradient-to-r from-blue-500 to-indigo-500 hover:from-blue-600 hover:to-indigo-600 text-white shadow-md hover:shadow-lg'}
+                      disabled:opacity-60 disabled:cursor-not-allowed`}
+                  >
+                    {isConverting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        正在转换…
+                      </>
+                    ) : convertSuccess ? (
+                      <>
+                        <CheckCircle className="w-4 h-4" />
+                        转换成功！已下载
+                      </>
+                    ) : (
+                      <>
+                        <ArrowDownToLine className="w-4 h-4" />
+                        {is3MF ? '转换并下载 STL' : '下载 STL'}
+                      </>
+                    )}
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {modelFile && (
               <motion.div
@@ -141,6 +237,10 @@ const App: React.FC = () => {
                 <li className="flex items-center gap-2">
                   <Ruler className="w-4 h-4 text-purple-500" />
                   <span>精确尺寸测量与显示</span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <ArrowDownToLine className="w-4 h-4 text-indigo-500" />
+                  <span>3MF → STL 格式转换导出</span>
                 </li>
                 <li className="flex items-center gap-2">
                   <Brain className="w-4 h-4 text-pink-500" />
@@ -196,19 +296,19 @@ const App: React.FC = () => {
             <CheckCircle className="w-6 h-6 text-green-500" />
             使用指南
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div className="bg-white/50 dark:bg-gray-800/50 p-5 rounded-xl">
               <div className="text-3xl font-bold text-primary-600 mb-2">01</div>
               <h4 className="font-semibold mb-2">上传文件</h4>
               <p className="text-gray-600 dark:text-gray-300 text-sm">
-                拖拽或点击上传3MF或STL格式的3D模型文件，支持二进制和ASCII格式
+                拖拽或点击上传3MF或STL格式的3D模型文件
               </p>
             </div>
             <div className="bg-white/50 dark:bg-gray-800/50 p-5 rounded-xl">
               <div className="text-3xl font-bold text-primary-600 mb-2">02</div>
               <h4 className="font-semibold mb-2">查看模型</h4>
               <p className="text-gray-600 dark:text-gray-300 text-sm">
-                使用鼠标或触摸屏旋转、缩放、平移3D模型，从不同角度观察细节
+                使用鼠标或触摸屏旋转、缩放、平移3D模型
               </p>
             </div>
             <div className="bg-white/50 dark:bg-gray-800/50 p-5 rounded-xl">
@@ -218,6 +318,13 @@ const App: React.FC = () => {
                 查看精确尺寸数据，分析模型面数、顶点数等统计信息
               </p>
             </div>
+            <div className="bg-white/50 dark:bg-gray-800/50 p-5 rounded-xl">
+              <div className="text-3xl font-bold text-primary-600 mb-2">04</div>
+              <h4 className="font-semibold mb-2">转换导出</h4>
+              <p className="text-gray-600 dark:text-gray-300 text-sm">
+                上传3MF后点击「转换并下载 STL」，一键获得可用于切片的STL文件
+              </p>
+            </div>
           </div>
         </motion.div>
       </main>
@@ -225,10 +332,10 @@ const App: React.FC = () => {
       <footer className="border-t border-gray-200 dark:border-gray-800 py-8">
         <div className="container mx-auto px-4 text-center">
           <p className="text-gray-500 dark:text-gray-400">
-            © 2026 3D模型查看器 • 基于Three.js和React构建 • 支持3MF/STL格式
+            © 2026 3D模型查看器 · 支持3MF/STL格式 · 3MF→STL转换
           </p>
           <p className="text-sm text-gray-400 dark:text-gray-500 mt-2">
-            所有模型解析均在浏览器本地完成，无需上传到服务器
+            所有解析与转换均在浏览器本地完成，无需上传到服务器，隐私安全
           </p>
         </div>
       </footer>
