@@ -2,6 +2,7 @@ import JSZip from 'jszip';
 import { FileParserResult, ModelGeometry } from '../types';
 
 // ─── 3MF 命名空间 ────────────────────────────────────────────────
+// 官方标准命名空间
 const NS_3MF = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02';
 
 // ─── 辅助：安全解析 float ────────────────────────────────────────
@@ -170,39 +171,71 @@ export async function parse3MFFile(file: File): Promise<FileParserResult> {
     // 调试：显示XML结构的前几行
     console.log('XML documentElement:', xmlDoc.documentElement?.tagName, 'namespace:', xmlDoc.documentElement?.namespaceURI);
     
-    // 查找所有可能的元素
+    // Step 4: 采用更智能的查找策略
+    console.log('XML文档结构:', xmlDoc.documentElement?.outerHTML?.substring(0, 1000));
+    
     const allElements: Element[] = [];
     
-    // Step 4: 提取所有 mesh - 尝试多种方式
-    // 1. 带命名空间的mesh
-    const meshesNS = Array.from(xmlDoc.getElementsByTagNameNS(NS_3MF, 'mesh'));
-    if (meshesNS.length > 0) allElements.push(...meshesNS);
+    // 方法1: 递归遍历所有元素，查找任何包含"mesh"的元素
+    const traverseElements = (node: Element) => {
+      // 检查当前节点的tagName是否包含"mesh"
+      const tagName = node.tagName.toLowerCase();
+      
+      if (tagName.includes('mesh')) {
+        console.log('找到mesh元素:', node.tagName, 'namespace:', node.namespaceURI);
+        allElements.push(node);
+      }
+      
+      // 遍历子元素
+      for (const child of Array.from(node.children)) {
+        if (child.nodeType === Node.ELEMENT_NODE) {
+          traverseElements(child as Element);
+        }
+      }
+    };
     
-    // 2. 不带命名空间的mesh
-    const meshesNoNS = Array.from(xmlDoc.getElementsByTagName('mesh'));
-    if (meshesNoNS.length > 0) {
-      const uniqueMeshes = meshesNoNS.filter(el => !allElements.includes(el));
-      allElements.push(...uniqueMeshes);
-    }
+    traverseElements(xmlDoc.documentElement);
     
-    // 3. 尝试查找 resources -> object -> mesh 路径
-    const resources = xmlDoc.getElementsByTagNameNS(NS_3MF, 'resources') || xmlDoc.getElementsByTagName('resources');
-    if (resources.length > 0) {
-      const objects = (resources[0].getElementsByTagNameNS(NS_3MF, 'object') || resources[0].getElementsByTagName('object'));
-      for (const obj of Array.from(objects)) {
-        const meshChildren = obj.getElementsByTagNameNS(NS_3MF, 'mesh') || obj.getElementsByTagName('mesh');
-        if (meshChildren.length > 0) {
-          const unique = Array.from(meshChildren).filter(el => !allElements.includes(el));
-          allElements.push(...unique);
+    // 方法2: 如果还没找到，尝试更直接的XPath查询
+    if (allElements.length === 0) {
+      console.log('尝试XPath查找...');
+      
+      // 尝试不同的命名空间组合
+      const namespaces = [
+        'http://schemas.microsoft.com/3dmanufacturing/core/2015/02',  // 官方
+        'http://schemas.microsoft.com/3dmanufacturing/core/2015/02',  // 常用
+        'http://schemas.microsoft.com/3dmanufacturing/core/2017/02',  // 新版本
+        null  // 无命名空间
+      ];
+      
+      for (const ns of namespaces) {
+        const query = ns ? `//*[local-name()='mesh' and namespace-uri()='${ns}']` : '//mesh';
+        const result = xmlDoc.evaluate(
+          query, 
+          xmlDoc, 
+          null, 
+          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, 
+          null
+        );
+        
+        for (let i = 0; i < result.snapshotLength; i++) {
+          const el = result.snapshotItem(i) as Element;
+          if (!allElements.includes(el)) {
+            console.log('XPath找到mesh:', el.tagName, 'namespace:', el.namespaceURI);
+            allElements.push(el);
+          }
         }
       }
     }
     
-    console.log(`找到 ${allElements.length} 个mesh元素`);
+    console.log(`总共找到 ${allElements.length} 个mesh元素`);
     if (allElements.length === 0) {
-      // 输出一些调试信息
-      const firstChild = xmlDoc.documentElement?.firstElementChild;
-      console.log('第一个子元素:', firstChild?.tagName);
+      // 输出更详细的调试信息
+      const root = xmlDoc.documentElement;
+      console.log('根元素完整tag:', root?.outerHTML?.substring(0, 500));
+      const children = Array.from(root?.children || []);
+      console.log('根元素子节点:', children.map(c => c.tagName).join(', '));
+      
       return { success: false, error: '3MF 文件中未找到网格数据' };
     }
 
