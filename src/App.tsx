@@ -284,6 +284,7 @@ const App: React.FC = () => {
                       file={modelFile}
                       dimensions={dimensions}
                       stats={stats}
+                      geometry={geometryRef}
                       isLoading={isLoading}
                       error={error}
                     />

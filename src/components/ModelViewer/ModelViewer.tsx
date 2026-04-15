@@ -1,213 +1,172 @@
-import React, { Suspense, useRef, useState, useEffect } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid, Stats, Bounds, Html } from '@react-three/drei';
+import React, { Suspense, useRef, useEffect, useMemo } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
+import { OrbitControls, Html } from '@react-three/drei';
 import * as THREE from 'three';
-import { ModelFile, ModelDimensions, ModelStats } from '../../types';
-import { Loader2, Maximize2, RotateCw, ZoomIn, ZoomOut, Box as Cube, AlertCircle } from 'lucide-react';
+import { ModelFile, ModelDimensions, ModelStats, ModelGeometry } from '../../types';
+import { Loader2, Maximize2, RotateCw, Box as Cube, AlertCircle } from 'lucide-react';
 
 interface ModelViewerProps {
   file: ModelFile | null;
   dimensions: ModelDimensions | null;
   stats: ModelStats | null;
+  geometry: ModelGeometry | null;
   isLoading: boolean;
   error: string | null;
 }
 
-interface SceneContentProps {
-  file: ModelFile | null;
-  dimensions: ModelDimensions | null;
-  showGrid?: boolean;
-  showAxes?: boolean;
-}
-
-const ModelMesh: React.FC<{ dimensions: ModelDimensions | null }> = ({ dimensions }) => {
+// ─── 渲染真实网格 ─────────────────────────────────────────────────
+const RealModelMesh: React.FC<{ geometry: ModelGeometry }> = ({ geometry }) => {
   const meshRef = useRef<THREE.Mesh>(null);
-  const materialRef = useRef<THREE.MeshStandardMaterial>(null);
-  const [hovered, setHovered] = useState(false);
 
-  useFrame(() => {
-    if (meshRef.current) {
-      // 缓慢旋转模型
-      meshRef.current.rotation.y += 0.002;
+  const threeGeometry = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+
+    // 设置顶点位置
+    geo.setAttribute('position', new THREE.BufferAttribute(geometry.position, 3));
+
+    // 设置法线
+    if (geometry.normal && geometry.normal.length > 0) {
+      geo.setAttribute('normal', new THREE.BufferAttribute(geometry.normal, 3));
     }
-  });
 
-  if (!dimensions) return null;
+    // 设置索引
+    if (geometry.index && geometry.index.length > 0) {
+      geo.setIndex(new THREE.BufferAttribute(geometry.index, 1));
+    }
 
-  // 根据尺寸创建几何体
-  const geometry = new THREE.BoxGeometry(
-    dimensions.width,
-    dimensions.height,
-    dimensions.depth
-  );
+    // 如果没有法线，自动计算
+    if (!geometry.normal || geometry.normal.length === 0) {
+      geo.computeVertexNormals();
+    }
+
+    // 居中几何体
+    geo.computeBoundingBox();
+    const center = new THREE.Vector3();
+    geo.boundingBox!.getCenter(center);
+    geo.translate(-center.x, -center.y, -center.z);
+
+    return geo;
+  }, [geometry]);
+
+  // 清理
+  useEffect(() => {
+    return () => {
+      threeGeometry.dispose();
+    };
+  }, [threeGeometry]);
 
   return (
-    <mesh
-      ref={meshRef}
-      geometry={geometry}
-      onPointerOver={() => setHovered(true)}
-      onPointerOut={() => setHovered(false)}
-      castShadow
-      receiveShadow
-    >
+    <mesh ref={meshRef} geometry={threeGeometry} castShadow receiveShadow>
       <meshStandardMaterial
-        ref={materialRef}
-        color={hovered ? '#3b82f6' : '#6366f1'}
-        metalness={0.5}
-        roughness={0.2}
-        transparent
-        opacity={0.9}
+        color="#6366f1"
+        metalness={0.2}
+        roughness={0.5}
+        side={THREE.DoubleSide}
       />
     </mesh>
   );
 };
 
-const GridHelper: React.FC<{ showGrid: boolean }> = ({ showGrid }) => {
-  if (!showGrid) return null;
-  
-  return (
-    <>
-      <Grid
-        args={[10, 10]}
-        cellSize={10}
-        cellThickness={1}
-        cellColor="#6b7280"
-        sectionSize={3}
-        sectionThickness={1.5}
-        sectionColor="#9ca3af"
-        fadeDistance={30}
-        fadeStrength={1}
-        followCamera={false}
-        infiniteGrid={true}
-      />
-      <gridHelper args={[100, 100, '#4b5563', '#374151']} />
-    </>
-  );
-};
-
-const AxesHelper: React.FC<{ showAxes: boolean }> = ({ showAxes }) => {
-  if (!showAxes) return null;
-  
-  return (
-    <>
-      <axesHelper args={[50]} />
-      {/* X轴 - 红色 */}
-      <arrowHelper
-        args={[
-          new THREE.Vector3(1, 0, 0),
-          new THREE.Vector3(0, 0, 0),
-          30,
-          0xff4444,
-          2,
-          1
-        ]}
-      />
-      {/* Y轴 - 绿色 */}
-      <arrowHelper
-        args={[
-          new THREE.Vector3(0, 1, 0),
-          new THREE.Vector3(0, 0, 0),
-          30,
-          0x44ff44,
-          2,
-          1
-        ]}
-      />
-      {/* Z轴 - 蓝色 */}
-      <arrowHelper
-        args={[
-          new THREE.Vector3(0, 0, 1),
-          new THREE.Vector3(0, 0, 0),
-          30,
-          0x4444ff,
-          2,
-          1
-        ]}
-      />
-    </>
-  );
-};
-
-const Lighting: React.FC = () => {
-  return (
-    <>
-      <ambientLight intensity={0.5} />
-      <directionalLight
-        position={[10, 10, 5]}
-        intensity={0.8}
-        castShadow
-        shadow-mapSize={[1024, 1024]}
-      />
-      <directionalLight
-        position={[-10, 10, -5]}
-        intensity={0.4}
-        color="#ffaa33"
-      />
-      <pointLight position={[0, 5, 0]} intensity={0.3} color="#ff4444" />
-    </>
-  );
-};
-
-const SceneContent: React.FC<SceneContentProps> = ({ dimensions, showGrid = true, showAxes = true }) => {
+// ─── 相机自适应控制器 ─────────────────────────────────────────────
+const CameraController: React.FC<{ dimensions: ModelDimensions | null }> = ({ dimensions }) => {
+  const { camera, controls } = useThree();
   const controlsRef = useRef<any>(null);
-  const { camera } = useThree();
 
-  // 当模型尺寸变化时，调整相机位置
   useEffect(() => {
-    if (dimensions && controlsRef.current) {
-      const maxDimension = Math.max(dimensions.width, dimensions.height, dimensions.depth);
-      const distance = maxDimension * 3;
-      
-      camera.position.set(distance, distance, distance);
-      controlsRef.current.target.set(0, 0, 0);
-      controlsRef.current.update();
+    if (!dimensions) return;
+
+    const maxDim = Math.max(dimensions.width, dimensions.height, dimensions.depth);
+    const dist = maxDim * 2.5;
+
+    camera.position.set(dist, dist * 0.8, dist);
+    camera.near = maxDim * 0.001;
+    camera.far = maxDim * 100;
+    (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
+
+    const ctrl = controlsRef.current || (controls as any);
+    if (ctrl) {
+      ctrl.target.set(0, 0, 0);
+      ctrl.minDistance = maxDim * 0.1;
+      ctrl.maxDistance = maxDim * 20;
+      ctrl.update();
     }
-  }, [dimensions, camera]);
+  }, [dimensions, camera, controls]);
+
+  return (
+    <OrbitControls
+      ref={controlsRef}
+      enableDamping
+      dampingFactor={0.05}
+      rotateSpeed={0.6}
+      zoomSpeed={1.0}
+      panSpeed={0.8}
+      maxPolarAngle={Math.PI}
+    />
+  );
+};
+
+// ─── 灯光 ─────────────────────────────────────────────────────────
+const Lighting: React.FC = () => (
+  <>
+    <ambientLight intensity={0.6} />
+    <directionalLight position={[10, 15, 10]} intensity={1.0} castShadow />
+    <directionalLight position={[-10, 10, -5]} intensity={0.5} color="#c0c8ff" />
+    <directionalLight position={[0, -10, 0]}  intensity={0.2} color="#fff0cc" />
+  </>
+);
+
+// ─── 网格地面 ─────────────────────────────────────────────────────
+const GridFloor: React.FC<{ size: number }> = ({ size }) => {
+  const gridSize = Math.max(size * 4, 100);
+  const divisions = 20;
+  return (
+    <gridHelper
+      args={[gridSize, divisions, '#444466', '#333344']}
+      position={[0, -size / 2, 0]}
+    />
+  );
+};
+
+// ─── 主场景 ───────────────────────────────────────────────────────
+const Scene: React.FC<{
+  geometry: ModelGeometry | null;
+  dimensions: ModelDimensions | null;
+  showGrid: boolean;
+  showAxes: boolean;
+}> = ({ geometry, dimensions, showGrid, showAxes }) => {
+  const maxDim = dimensions
+    ? Math.max(dimensions.width, dimensions.height, dimensions.depth)
+    : 100;
 
   return (
     <>
       <Lighting />
-      <OrbitControls
-        ref={controlsRef}
-        enableDamping
-        dampingFactor={0.05}
-        rotateSpeed={0.5}
-        panSpeed={0.5}
-        zoomSpeed={0.8}
-        minDistance={1}
-        maxDistance={500}
-        maxPolarAngle={Math.PI}
-        minPolarAngle={0}
-        enableZoom={true}
-        enablePan={true}
-        enableRotate={true}
-      />
-      
-      <Bounds fit clip observe margin={1.2}>
-        <ModelMesh dimensions={dimensions} />
-      </Bounds>
-      
-      <GridHelper showGrid={showGrid} />
-      <AxesHelper showAxes={showAxes} />
+      <CameraController dimensions={dimensions} />
+
+      {geometry && <RealModelMesh geometry={geometry} />}
+
+      {showGrid && <GridFloor size={maxDim} />}
+      {showAxes && <axesHelper args={[maxDim * 1.2]} />}
     </>
   );
 };
 
+// ─── 组件主体 ─────────────────────────────────────────────────────
 const ModelViewer: React.FC<ModelViewerProps> = ({
   file,
   dimensions,
   stats,
+  geometry,
   isLoading,
   error,
 }) => {
-  const [showGrid, setShowGrid] = useState(true);
-  const [showAxes, setShowAxes] = useState(true);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showGrid, setShowGrid] = React.useState(true);
+  const [showAxes, setShowAxes] = React.useState(true);
+  const [isFullscreen, setIsFullscreen] = React.useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
 
   const toggleFullscreen = () => {
     if (!canvasRef.current) return;
-
     if (!document.fullscreenElement) {
       canvasRef.current.requestFullscreen();
       setIsFullscreen(true);
@@ -218,34 +177,20 @@ const ModelViewer: React.FC<ModelViewerProps> = ({
   };
 
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-    };
-
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
   }, []);
-
-  const handleResetView = () => {
-    // 这里稍后实现重置视图的逻辑
-  };
-
-  const handleZoomIn = () => {
-    // 这里稍后实现放大逻辑
-  };
-
-  const handleZoomOut = () => {
-    // 这里稍后实现缩小逻辑
-  };
 
   return (
     <div className="relative scene-container" ref={canvasRef}>
-      {/* 控制面板 */}
+      {/* 左侧控制按钮 */}
       <div className="absolute top-4 left-4 z-10 flex flex-col gap-2">
         <div className="bg-black/50 backdrop-blur-sm rounded-lg p-2 flex flex-col gap-1">
+          {/* 网格开关 */}
           <button
-            onClick={() => setShowGrid(!showGrid)}
-            className={`p-2 rounded hover:bg-white/10 transition-colors ${showGrid ? 'text-green-400' : 'text-gray-400'}`}
+            onClick={() => setShowGrid(v => !v)}
+            className={`p-2 rounded hover:bg-white/10 transition-colors ${showGrid ? 'text-green-400' : 'text-gray-500'}`}
             title="显示/隐藏网格"
           >
             <div className="w-5 h-5 grid grid-cols-2 gap-0.5">
@@ -254,54 +199,36 @@ const ModelViewer: React.FC<ModelViewerProps> = ({
               ))}
             </div>
           </button>
-          
+          {/* 坐标轴开关 */}
           <button
-            onClick={() => setShowAxes(!showAxes)}
-            className={`p-2 rounded hover:bg-white/10 transition-colors ${showAxes ? 'text-yellow-400' : 'text-gray-400'}`}
+            onClick={() => setShowAxes(v => !v)}
+            className={`p-2 rounded hover:bg-white/10 transition-colors ${showAxes ? 'text-yellow-400' : 'text-gray-500'}`}
             title="显示/隐藏坐标轴"
           >
             <div className="w-5 h-5 relative">
-              <div className="absolute top-1/2 left-0 right-0 h-0.5 bg-current transform -translate-y-1/2" />
-              <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-current transform -translate-x-1/2" />
+              <div className="absolute top-1/2 left-0 right-0 h-0.5 bg-current -translate-y-1/2" />
+              <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-current -translate-x-1/2" />
             </div>
           </button>
-          
+          {/* 全屏按钮 */}
           <button
             onClick={toggleFullscreen}
             className="p-2 rounded hover:bg-white/10 transition-colors text-gray-300"
-            title={isFullscreen ? "退出全屏" : "全屏"}
+            title={isFullscreen ? '退出全屏' : '全屏'}
           >
-            {isFullscreen ? <Maximize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+            <Maximize2 className="w-5 h-5" />
           </button>
         </div>
       </div>
 
-      {/* 右侧控制面板 */}
-      <div className="absolute top-4 right-4 z-10">
-        <div className="bg-black/50 backdrop-blur-sm rounded-lg p-3 flex gap-2">
-          <button
-            onClick={handleResetView}
-            className="p-2 rounded hover:bg-white/10 transition-colors text-gray-300"
-            title="重置视图"
-          >
-            <RotateCw className="w-5 h-5" />
-          </button>
-          <button
-            onClick={handleZoomIn}
-            className="p-2 rounded hover:bg-white/10 transition-colors text-gray-300"
-            title="放大"
-          >
-            <ZoomIn className="w-5 h-5" />
-          </button>
-          <button
-            onClick={handleZoomOut}
-            className="p-2 rounded hover:bg-white/10 transition-colors text-gray-300"
-            title="缩小"
-          >
-            <ZoomOut className="w-5 h-5" />
-          </button>
+      {/* 右侧操作提示 */}
+      {file && !isLoading && !error && (
+        <div className="absolute top-4 right-4 z-10">
+          <div className="bg-black/50 backdrop-blur-sm rounded-lg p-2">
+            <RotateCw className="w-4 h-4 text-gray-400" />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* 底部状态栏 */}
       <div className="absolute bottom-4 left-0 right-0 z-10 px-4">
@@ -310,97 +237,70 @@ const ModelViewer: React.FC<ModelViewerProps> = ({
             {file && (
               <div className="flex items-center gap-2">
                 <Cube className="w-4 h-4 text-blue-400" />
-                <span className="text-sm text-gray-300">{file.name}</span>
+                <span className="text-sm text-gray-300 max-w-xs truncate">{file.name}</span>
               </div>
             )}
-            
             {stats && (
               <div className="hidden md:flex items-center gap-4 text-sm">
-                <div className="text-gray-300">
-                  顶点: <span className="text-green-400 font-medium">{stats.vertices.toLocaleString()}</span>
-                </div>
-                <div className="text-gray-300">
-                  面数: <span className="text-yellow-400 font-medium">{stats.faces.toLocaleString()}</span>
-                </div>
+                <span className="text-gray-400">顶点: <span className="text-green-400 font-medium">{stats.vertices.toLocaleString()}</span></span>
+                <span className="text-gray-400">面数: <span className="text-yellow-400 font-medium">{stats.faces.toLocaleString()}</span></span>
               </div>
             )}
           </div>
-          
-          <div className="text-xs text-gray-400">
-            透视视图
-          </div>
+          <div className="text-xs text-gray-500">拖拽旋转 · 滚轮缩放 · 右键平移</div>
         </div>
       </div>
 
-      {/* 3D场景 */}
+      {/* 内容区域 */}
       <div className="w-full h-full">
         {isLoading ? (
           <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-900 to-gray-800">
             <div className="text-center space-y-4">
-              <div className="relative">
-                <div className="w-16 h-16 border-4 border-gray-700 border-t-primary-500 rounded-full animate-spin mx-auto" />
-                <Cube className="w-8 h-8 text-primary-400 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 animate-pulse" />
-              </div>
-              <p className="text-gray-300 font-medium">正在加载3D模型...</p>
-              <p className="text-sm text-gray-400">解析模型数据中，请稍候</p>
+              <div className="w-16 h-16 border-4 border-gray-700 border-t-indigo-500 rounded-full animate-spin mx-auto" />
+              <p className="text-gray-300 font-medium">正在解析3D模型...</p>
             </div>
           </div>
         ) : error ? (
           <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-red-900/20 to-red-800/20">
-            <div className="text-center space-y-3 p-8 bg-red-900/30 rounded-2xl backdrop-blur-sm">
-              <div className="w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center mx-auto">
-                <AlertCircle className="w-6 h-6 text-red-400" />
-              </div>
+            <div className="text-center space-y-3 p-8 bg-red-900/30 rounded-2xl">
+              <AlertCircle className="w-10 h-10 text-red-400 mx-auto" />
               <h3 className="text-xl font-semibold text-red-300">加载失败</h3>
-              <p className="text-red-200">{error}</p>
+              <p className="text-red-200 text-sm max-w-sm">{error}</p>
             </div>
           </div>
-        ) : !file ? (
+        ) : !file || !geometry ? (
           <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-900 to-gray-800">
             <div className="text-center space-y-4">
-              <div className="w-20 h-20 mx-auto">
-                <div className="relative w-full h-full">
-                  <div className="absolute inset-0 border-2 border-dashed border-gray-600 rounded-2xl animate-pulse" />
-                  <Cube className="w-10 h-10 text-gray-500 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2" />
-                </div>
+              <div className="w-20 h-20 mx-auto border-2 border-dashed border-gray-600 rounded-2xl flex items-center justify-center">
+                <Cube className="w-10 h-10 text-gray-500" />
               </div>
               <div>
-                <h3 className="text-xl font-semibold text-gray-300 mb-2">等待上传文件</h3>
-                <p className="text-gray-400">请上传3MF或STL格式的3D模型文件</p>
+                <h3 className="text-xl font-semibold text-gray-300 mb-1">等待上传文件</h3>
+                <p className="text-gray-500 text-sm">支持 3MF / STL 格式</p>
               </div>
             </div>
           </div>
         ) : (
           <Canvas
             shadows
-            camera={{ position: [20, 20, 20], fov: 50 }}
-            gl={{ 
-              antialias: true,
-              alpha: false,
-              powerPreference: "high-performance"
-            }}
+            camera={{ position: [100, 80, 100], fov: 45 }}
+            gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
           >
-            <Suspense
-              fallback={
-                <Html center>
-                  <div className="flex items-center gap-2 bg-black/80 backdrop-blur-sm px-4 py-2 rounded-lg">
-                    <Loader2 className="w-5 h-5 text-primary-400 animate-spin" />
-                    <span className="text-white">加载3D场景...</span>
-                  </div>
-                </Html>
-              }
-            >
+            <Suspense fallback={
+              <Html center>
+                <div className="flex items-center gap-2 bg-black/80 px-4 py-2 rounded-lg">
+                  <Loader2 className="w-5 h-5 text-indigo-400 animate-spin" />
+                  <span className="text-white text-sm">加载场景...</span>
+                </div>
+              </Html>
+            }>
               <color attach="background" args={['#0f172a']} />
-              <fog attach="fog" args={['#0f172a', 20, 100]} />
-              
-              <SceneContent
-                file={file}
+              <Scene
+                geometry={geometry}
                 dimensions={dimensions}
                 showGrid={showGrid}
                 showAxes={showAxes}
               />
-              
-              <Stats showPanel={0} className="stats" />
             </Suspense>
           </Canvas>
         )}
